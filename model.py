@@ -56,9 +56,10 @@ class UpSampleRatio(nn.Module):
         self.Conv1x1 = nn.Conv2d(in_channels, features, (1, 1), bias=use_bias)
 
     def forward(self, x):
+        x = x.permute(0, 3, 1, 2)
         b, c, h, w = x.shape
         x = Resize((int(h * self.ratio), int(w * self.ratio)), interpolation=InterpolationMode.BILINEAR)(x)
-        out = self.Conv1x1(x)
+        out = self.Conv1x1(x).permute(0, 2, 3, 1)
         return out
 
 
