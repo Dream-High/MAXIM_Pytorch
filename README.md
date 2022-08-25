@@ -2,7 +2,6 @@ This repo is the official implementation of [**CVPR 2022 Oral**] paper: ["**MAXI
 
 
 ## Citation
-#Should you find this repository useful, please consider citing:
 ```
 @article{tu2022maxim,
   title={MAXIM: Multi-Axis MLP for Image Processing},
@@ -14,4 +13,4 @@ This repo is the official implementation of [**CVPR 2022 Oral**] paper: ["**MAXI
 
 ## Acknowledgement
 
-This repository is built on the [vision_transformer](https://github.com/google-research/vision_transformer) and [musiq](https://github.com/google-research/google-research/tree/master/musiq) repositories. Our work is also inspired by [HiT](https://github.com/google-research/hit-gan), [MPRNet](https://github.com/swz30/MPRNet), and [HINet](https://github.com/megvii-model/HINet).
+This repository is built on the [vision_transformer]([https://github.com/google-research/vision_transformer](https://github.com/google-research/maxim)) repositories.
