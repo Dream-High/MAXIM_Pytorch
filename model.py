@@ -302,7 +302,7 @@ class BottleneckBlock(nn.Module):
 class UNetEncoderBlock(nn.Module):
     """Encoder block in MAXIM."""
 
-    def __init__(self, in_channels, features, block_size, grid_size, num_groups=1, lrelu_slope=0.2,
+    def __init__(self, in_channels, in_channels_skip, in_channels_y, features, block_size, grid_size, num_groups=1, lrelu_slope=0.2,
                  block_gmlp_factor=2, grid_gmlp_factor=2, input_proj_factor=2, channels_reduction=4, dropout_rate=0.0,
                  downsample=True, use_global_mlp=True, use_bias=True, use_cross_gating=False):
         super(UNetEncoderBlock, self).__init__()
@@ -310,12 +310,12 @@ class UNetEncoderBlock(nn.Module):
         self.use_global_mlp = use_global_mlp
         self.use_cross_gating = use_cross_gating
         self.downsample = downsample
-        self.Conv1x1_skip = Conv1x1(in_channels + features, features, use_bias)
+        self.Conv1x1_skip = Conv1x1(in_channels + in_channels_skip, features, use_bias)
         self.Conv1x1 = Conv1x1(in_channels, features, use_bias)
         self.RSHMAGL = ResidualSplitHeadMultiAxisGmlpLayer(features, block_size, grid_size, block_gmlp_factor,
                                                            grid_gmlp_factor, input_proj_factor, use_bias, dropout_rate)
         self.rcab = RCAB(features, channels_reduction, lrelu_slope, use_bias)
-        self.cgb = CrossGatingBlock(in_channels, features, block_size, grid_size, dropout_rate, False,
+        self.cgb = CrossGatingBlock(in_channels_y, in_channels_y, features, block_size, grid_size, dropout_rate, False,
                                     use_bias)
         self.Conv_down = nn.Conv2d(features, features, (4, 4), (2, 2), padding=(1, 1), bias=use_bias)
 
@@ -349,18 +349,19 @@ class UNetEncoderBlock(nn.Module):
 class UNetDecoderBlock(nn.Module):
     """Decoder block in MAXIM."""
 
-    def __init__(self, in_channels, features, block_size, grid_size, num_groups=1, lrelu_slope=0.2,
-                 block_gmlp_factor=2, grid_gmlp_factor=2, input_proj_factor=2, channels_reduction=4, dropout_rate=0.0,
-                 downsample=True, use_global_mlp=True, use_bias=True):
+    def __init__(self, in_channels, in_channels_skip, in_channels_y, features, block_size, grid_size, num_groups=1,
+                 lrelu_slope=0.2, block_gmlp_factor=2, grid_gmlp_factor=2, input_proj_factor=2, channels_reduction=4,
+                 dropout_rate=0.0, use_global_mlp=True, use_bias=True):
         super(UNetDecoderBlock, self).__init__()
         self.ConvT_up = nn.ConvTranspose2d(in_channels, features, (2, 2), (2, 2), bias=use_bias)
-        self.encoderblock = UNetEncoderBlock(in_channels, features, block_size, grid_size, num_groups,
+        self.encoderblock = UNetEncoderBlock(features, in_channels_skip, in_channels_y, features, block_size,
+                                             grid_size, num_groups,
                                              lrelu_slope, block_gmlp_factor, grid_gmlp_factor, input_proj_factor,
-                                             channels_reduction, dropout_rate, downsample, use_global_mlp, use_bias)
+                                             channels_reduction, dropout_rate, False, use_global_mlp, use_bias)
 
     def forward(self, x, bridge=None):
         x = self.ConvT_up(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-        x = self.encoder(x, skip=bridge)
+        x = self.encoderblock(x, skip=bridge)
         return x
 
 
@@ -383,13 +384,13 @@ class GetSpatialGatingWeights(nn.Module):
         nn.init.normal_(self.dense_v.weight, std=2e-2)
         nn.init.ones_(self.dense_v.bias)
         self.dense = nn.Sequential(
-            nn.Linear(in_channels, in_channels, bias=use_bias),
+            nn.Linear(in_channels * input_proj_factor, in_channels, bias=use_bias),
             nn.Dropout(dropout_rate)
         )
 
     def forward(self, x):
-        b, h, w, c = x.shape
         x = self.layer1(x)
+        b, h, w, c = x.shape
         u, v = torch.split(x, c // 2, dim=-1)
 
         gh, gw = self.grid_size
@@ -418,13 +419,16 @@ class GetSpatialGatingWeights(nn.Module):
 class CrossGatingBlock(nn.Module):
     """Cross-gating MLP block."""
 
-    def __init__(self, in_channels, features, block_size, grid_size, dropout_rate=0.0, upsample_y=True,
+    def __init__(self, in_channels_x, in_channels_y, features, block_size, grid_size, dropout_rate=0.0, upsample_y=True,
                  use_bias=True):
         super(CrossGatingBlock, self).__init__()
         self.upsample_y = upsample_y
-        self.ConvT_up = nn.ConvTranspose2d(in_channels, features, (2, 2), (2, 2), bias=use_bias)
-        self.Conv1x1_x = nn.Conv2d(in_channels, features, (1, 1), bias=use_bias)
-        self.Conv1x1_y = nn.Conv2d(in_channels, features, (1, 1), bias=use_bias)
+        self.ConvT_up = nn.Sequential(
+            nn.ConvTranspose2d(in_channels_y, features, (2, 2), (2, 2), bias=use_bias),
+            nn.Conv2d(features, features, (1, 1), bias=use_bias)
+        )
+        self.Conv1x1_x = nn.Conv2d(in_channels_x, features, (1, 1), bias=use_bias)
+        self.Conv1x1_y = nn.Conv2d(in_channels_y, features, (1, 1), bias=use_bias)
         self.layer_x = nn.Sequential(
             nn.LayerNorm(features),
             nn.Linear(features, features, bias=use_bias),
@@ -453,9 +457,10 @@ class CrossGatingBlock(nn.Module):
     def forward(self, x, y):
         if self.upsample_y:
             y = self.ConvT_up(y.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+        else:
+            y = self.Conv1x1_y(y.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
 
         x = self.Conv1x1_x(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-        y = self.Conv1x1_y(y.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
         assert x.shape == y.shape
 
         shortcut_x = x
@@ -483,10 +488,10 @@ class SAM(nn.Module):
     def __init__(self, in_channels, features, out_channels, use_bias=True):
         super(SAM, self).__init__()
         self.out_channels = out_channels
-        self.Conv3x3_1 = nn.Conv2d(in_channels, features, (3, 3), bias=use_bias)
-        self.Conv3x3_2 = nn.Conv2d(features, out_channels, (3, 3), bias=use_bias)
+        self.Conv3x3_1 = nn.Conv2d(in_channels, features, (3, 3), padding=(1, 1), bias=use_bias)
+        self.Conv3x3_2 = nn.Conv2d(features, out_channels, (3, 3), padding=(1, 1), bias=use_bias)
         self.Conv3x3_3 = nn.Sequential(
-            nn.Conv2d(out_channels, features, (3, 3), bias=use_bias),
+            nn.Conv2d(out_channels, features, (3, 3), padding=(1, 1), bias=use_bias),
             nn.Sigmoid()
         )
 
@@ -559,17 +564,16 @@ class MAXIM(nn.Module):
             conv3x3_input = nn.ModuleList()
             cgb_input = nn.ModuleList()
             conv1x1_input = nn.ModuleList()
-            t_channels = in_channels
             for i in range(num_supervision_scales):
                 conv3x3_input.append(Conv3x3(in_channels, features * (2 ** i), use_bias))
                 if idx_stage > 0:
                     if self.use_cross_gating:
                         block_size = block_size_hr if i < high_res_stages else block_size_lr
                         grid_size = grid_size_hr if i < high_res_stages else block_size_lr
-                        cgb_input.append(CrossGatingBlock(t_channels, features * (2 ** i), block_size, grid_size,
-                                                               dropout_rate, False, use_bias))
+                        cgb_input.append(CrossGatingBlock(features * (2 ** i), features * (2 ** i), features * (2 ** i), block_size,
+                                                          grid_size, dropout_rate, False, use_bias))
                     else:
-                        conv1x1_input.append(Conv1x1(t_channels, features * (2 ** i), use_bias))
+                        conv1x1_input.append(Conv1x1(features * (2 ** i), features * (2 ** i), use_bias))
                 # t_channels = features * (2 ** i)
             self.stages_conv3x3_input.append(conv3x3_input)
             self.stages_cgb_input.append(cgb_input)
@@ -579,7 +583,6 @@ class MAXIM(nn.Module):
             encoders_channels = []
             t_channels = features
             for i in range(depth):
-
                 block_size = block_size_hr if i < high_res_stages else block_size_lr
                 grid_size = grid_size_hr if i < high_res_stages else block_size_lr
                 use_cross_gating_layer = True if idx_stage > 0 else False
@@ -587,10 +590,14 @@ class MAXIM(nn.Module):
                 # block_gmlp_factor = 2, grid_gmlp_factor = 2, input_proj_factor = 2, channels_reduction = 4, dropout_rate = 0.0,
                 # downsample = True, use_global_mlp = True, use_bias = True, use_cross_gating = False)
                 encoders.append(
-                    UNetEncoderBlock(t_channels, features * (2 ** i), block_size, grid_size, num_groups, lrelu_slope,
+                    UNetEncoderBlock(t_channels, features * (2 ** i), features * (2 ** i), features * (2 ** i), block_size,
+                                     grid_size, num_groups, lrelu_slope,
                                      block_gmlp_factor, grid_gmlp_factor, input_proj_factor, channels_reduction,
                                      dropout_rate, True, use_global_mlp, use_bias, use_cross_gating_layer)
                 )
+                # if idx_stage > 0:
+                #     t_channels = features * (2 ** (i + 1))
+                # else:
                 t_channels = features * (2 ** i)
                 encoders_channels.append(t_channels)
             self.stages_encoders.append(encoders)
@@ -601,18 +608,18 @@ class MAXIM(nn.Module):
                 # (self, in_channels, features, block_size, grid_size, num_groups=1, block_gmlp_factor=2,
                 # grid_gmlp_factor=2, input_proj_factor=2, channels_reduction=4, dropout_rate=0.0, use_bias=True)
                 bottleneckblocks.append(
-                    BottleneckBlock(t_channels, (2 ** (self.depth - 1)) * features, block_size_lr, block_size_lr,
-                                    num_groups, block_gmlp_factor, grid_gmlp_factor, input_proj_factor,
-                                    channels_reduction, dropout_rate, use_bias)
+                    BottleneckBlock((2 ** (self.depth - 1)) * features, (2 ** (self.depth - 1)) * features,
+                                    block_size_lr, block_size_lr, num_groups, block_gmlp_factor, grid_gmlp_factor,
+                                    input_proj_factor, channels_reduction, dropout_rate, use_bias)
                 )
-                t_channels = (2 ** (self.depth - 1)) * features
+                # t_channels =
             self.stages_bottleneckblocks.append(bottleneckblocks)
 
             usr_cgb = nn.ModuleList()
             cgb_cgb = nn.ModuleList()
             conv1x1_cgb = nn.ModuleList()
             conv3x3_cgb = nn.ModuleList()
-            t_channels = in_channels
+            in_channels_y = (2 ** (depth - 1)) * features
             for i in reversed(range(depth)):
                 block_size = block_size_hr if i < high_res_stages else block_size_lr
                 grid_size = grid_size_hr if i < high_res_stages else block_size_lr
@@ -624,12 +631,13 @@ class MAXIM(nn.Module):
                     # (self, in_channels, features, block_size, grid_size, dropout_rate=0.0, upsample_y=True,
                     # use_bias=True)
                     cgb_cgb.append(
-                        CrossGatingBlock(in_channels, (2 ** i) * features, block_size, grid_size, dropout_rate, True,
-                                         use_bias)
+                        CrossGatingBlock((2 ** i) * features * depth, in_channels_y, (2 ** i) * features,
+                                         block_size, grid_size, dropout_rate, True, use_bias)
                     )
+                    in_channels_y = (2 ** i) * features
                 else:
-                    conv1x1_cgb.append(Conv1x1(t_channels, features * (2 ** i), use_bias))
-                    conv3x3_cgb.append(Conv3x3(t_channels, features * (2 ** i), use_bias))
+                    conv1x1_cgb.append(Conv1x1((2 ** i) * features * depth, features * (2 ** i), use_bias))
+                    conv3x3_cgb.append(Conv3x3(features * (2 ** i), features * (2 ** i), use_bias))
             self.stages_usr_cgb.append(usr_cgb)
             self.stages_cgb_cgb.append(cgb_cgb)
             self.stages_conv1x1_cgb.append(conv1x1_cgb)
@@ -639,28 +647,32 @@ class MAXIM(nn.Module):
             de = nn.ModuleList()
             sam_de = nn.ModuleList()
             conv3x3_de = nn.ModuleList()
-            t_channels = in_channels
+            in_channels_y = (2 ** (depth - 1)) * features
+            # t_channels = features
             for i in reversed((range(depth))):
                 block_size = block_size_hr if i < high_res_stages else block_size_lr
                 grid_size = grid_size_hr if i < high_res_stages else block_size_lr
                 usr_de.append(nn.ModuleList())
+                # (depth - j - 1 - i)
                 for j in range(depth):
                     usr_de[depth-i-1].append(
-                        UpSampleRatio(encoders_channels[j], (2 ** i) * features, 2 ** (depth - j - 1 - i), use_bias)
+                        UpSampleRatio(encoders_channels[depth-j-1], (2 ** i) * features, 2 ** (depth - j - 1 - i), use_bias)
                     )
                 # (self, in_channels, features, block_size, grid_size, num_groups=1, lrelu_slope=0.2,
                 # block_gmlp_factor=2, grid_gmlp_factor=2, input_proj_factor=2, channels_reduction=4, dropout_rate=0.0,
                 # downsample=True, use_global_mlp=True, use_bias=True)
                 de.append(
-                    UNetDecoderBlock(in_channels, (2 ** i) * features, block_size, grid_size, num_groups, lrelu_slope,
+                    UNetDecoderBlock(in_channels_y, (2**i)*features*depth, in_channels_y, (2 ** i) * features,
+                                     block_size, grid_size, num_groups, lrelu_slope,
                                      block_gmlp_factor, grid_gmlp_factor, input_proj_factor, channels_reduction,
-                                     dropout_rate, True, use_global_mlp, use_bias)
+                                     dropout_rate, use_global_mlp, use_bias)
                 )
                 if i < self.num_supervision_scales:
                     if idx_stage < self.num_stages - 1:
-                        sam_de.append(SAM(t_channels, (2 ** i) * features, num_outputs, use_bias))
+                        sam_de.append(SAM((2 ** i) * features, (2 ** i) * features, num_outputs, use_bias))
                     else:
-                        conv3x3_de.append(Conv3x3(t_channels, num_outputs, use_bias))
+                        conv3x3_de.append(Conv3x3((2 ** i) * features, num_outputs, use_bias))
+                in_channels_y = (2 ** i) * features
             self.stages_usr_de.append(usr_de)
             self.stages_de.append(de)
             self.stages_sam_de.append(sam_de)
@@ -685,12 +697,6 @@ class MAXIM(nn.Module):
                         x_scale, _ = self.stages_cgb_input[idx_stage][i](x_scale, sam_features.pop())
                     else:
                         x_scale = self.stages_conv1x1_input[idx_stage][i](torch.cat([x_scale, sam_features.pop()], dim=-1))
-
-                if idx_stage > 0:
-                    if self.use_cross_gating:
-                        x_scale, _ = self.cgb_list[i](x_scale, sam_features.pop())
-                    else:
-                        x_scale = self.conv1x1_list[i](torch.cat([x_scale, sam_features.pop()], dim=1))
                 x_scales.append(x_scale)
 
             encs = []
@@ -712,8 +718,13 @@ class MAXIM(nn.Module):
 
             skip_features = []
             for i in reversed(range(self.depth)):
-                signal = torch.cat([self.stages_usr_cgb[idx_stage][self.depth-i-1](enc) for j, enc in enumerate(encs)],
-                                   dim=-1)
+                # signal_tmp = []
+                # for j, enc in enumerate(encs):
+                #     t = self.stages_usr_cgb[idx_stage][self.depth - i - 1][j](enc)
+                #     signal_tmp.append(t)
+                # signal = torch.cat(signal_tmp, dim=-1)
+                signal = torch.cat([self.stages_usr_cgb[idx_stage][self.depth-i-1][j](enc)
+                                    for j, enc in enumerate(encs)], dim=-1)
 
                 if self.use_cross_gating:
                     skips, global_feature = self.stages_cgb_cgb[idx_stage][self.depth-i-1](signal, global_feature)
@@ -724,9 +735,14 @@ class MAXIM(nn.Module):
 
             outputs, decs, sam_features = [], [], []
             for i in reversed(range(self.depth)):
-                signal = torch.cat([self.stages_usr_de[idx_stage][self.depth-i-1](skip)
+                # signal_tmp = []
+                # for j, enc in enumerate(skip_features):
+                #     t = self.stages_usr_de[idx_stage][self.depth-i-1][j](enc)
+                #     signal_tmp.append(t)
+                # signal = torch.cat(signal_tmp, dim=-1)
+                signal = torch.cat([self.stages_usr_de[idx_stage][self.depth-i-1][j](skip)
                                     for j, skip in enumerate(skip_features)], dim=-1)
-                x = self.stages_de(x, signal)
+                x = self.stages_de[idx_stage][self.depth-i-1](x, signal)
                 decs.append(x)
 
                 if i < self.num_supervision_scales:
