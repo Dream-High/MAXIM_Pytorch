@@ -1,1 +1,1 @@
-
+This repo is the official implementation of [CVPR 2022 Oral] paper: "MAXIM: Multi-Axis MLP for Image Processing" by Zhengzhong Tu, Hossein Talebi, Han Zhang, Feng Yang, Peyman Milanfar, Alan Bovik, and Yinxiao Li
