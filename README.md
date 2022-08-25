@@ -13,4 +13,4 @@ This repo is the official implementation of [**CVPR 2022 Oral**] paper: ["**MAXI
 
 ## Acknowledgement
 
-This repository is built on the [vision_transformer]([https://github.com/google-research/vision_transformer](https://github.com/google-research/maxim)) repositories.
+This repository is built on the [MAXIM]([https://github.com/google-research/maxim]) repositories.
