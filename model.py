@@ -287,15 +287,26 @@ class BottleneckBlock(nn.Module):
         super(BottleneckBlock, self).__init__()
         self.num_groups = num_groups
         self.Conv1x1 = nn.Conv2d(in_channels, features, (1, 1), bias=use_bias)
-        self.layers = nn.Sequential(
-            ResidualSplitHeadMultiAxisGmlpLayer(features, block_size, grid_size, block_gmlp_factor,
-                                                grid_gmlp_factor, input_proj_factor, use_bias, dropout_rate),
-            RDCAB(features, features, channels_reduction, use_bias)
-        )
+        self.layers = nn.ModuleList()
+        for i in range(num_groups):
+            self.layers.append(nn.Sequential(
+                ResidualSplitHeadMultiAxisGmlpLayer(features, block_size, grid_size, block_gmlp_factor,
+                                                    grid_gmlp_factor, input_proj_factor, use_bias, dropout_rate),
+                RDCAB(features, features, channels_reduction, use_bias)
+            ))
+        # self.layers = nn.Sequential(
+        #     ResidualSplitHeadMultiAxisGmlpLayer(features, block_size, grid_size, block_gmlp_factor,
+        #                                         grid_gmlp_factor, input_proj_factor, use_bias, dropout_rate),
+        #     RDCAB(features, features, channels_reduction, use_bias)
+        # )
 
     def forward(self, x):
         x = self.Conv1x1(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-        x = x + self.layers(x)
+        shortcut_long = x
+        for i in range(self.num_groups):
+            x = self.layers[i](x)
+        x = x + shortcut_long
+        # x = x + self.layers(x)
         return x
 
 
@@ -312,12 +323,27 @@ class UNetEncoderBlock(nn.Module):
         self.downsample = downsample
         self.Conv1x1_skip = Conv1x1(in_channels + in_channels_skip, features, use_bias)
         self.Conv1x1 = Conv1x1(in_channels, features, use_bias)
-        self.RSHMAGL = ResidualSplitHeadMultiAxisGmlpLayer(features, block_size, grid_size, block_gmlp_factor,
-                                                           grid_gmlp_factor, input_proj_factor, use_bias, dropout_rate)
-        self.rcab = RCAB(features, channels_reduction, lrelu_slope, use_bias)
-        self.cgb = CrossGatingBlock(in_channels_y, in_channels_y, features, block_size, grid_size, dropout_rate, False,
-                                    use_bias)
-        self.Conv_down = nn.Conv2d(features, features, (4, 4), (2, 2), padding=(1, 1), bias=use_bias)
+        self.layers = nn.ModuleList()
+        if use_global_mlp:
+            for i in range(num_groups):
+                self.layers.append(nn.Sequential(
+                    ResidualSplitHeadMultiAxisGmlpLayer(features, block_size, grid_size, block_gmlp_factor,
+                                                        grid_gmlp_factor, input_proj_factor, use_bias, dropout_rate),
+                    RCAB(features, channels_reduction, lrelu_slope, use_bias)
+                ))
+        else:
+            for i in range(num_groups):
+                self.layers.append(nn.Sequential(
+                    RCAB(features, channels_reduction, lrelu_slope, use_bias)
+                ))
+        # self.RSHMAGL = ResidualSplitHeadMultiAxisGmlpLayer(features, block_size, grid_size, block_gmlp_factor,
+        #                                                    grid_gmlp_factor, input_proj_factor, use_bias, dropout_rate)
+        # self.rcab = RCAB(features, channels_reduction, lrelu_slope, use_bias)
+        if use_cross_gating:
+            self.cgb = CrossGatingBlock(in_channels_y, in_channels_y, features, block_size, grid_size, dropout_rate,
+                                        False, use_bias)
+        if downsample:
+            self.Conv_down = nn.Conv2d(features, features, (4, 4), (2, 2), padding=(1, 1), bias=use_bias)
 
     def forward(self, x, skip=None, enc=None, dec=None):
         if skip is not None:
@@ -328,10 +354,11 @@ class UNetEncoderBlock(nn.Module):
 
         shortcut_long = x
         for i in range(self.num_groups):
-            if self.use_global_mlp:
-                x = self.RSHMAGL(x)
-
-            x = self.rcab(x)
+            x = self.layers[i](x)
+            # if self.use_global_mlp:
+            #     x = self.RSHMAGL(x)
+            #
+            # x = self.rcab(x)
 
         x = x + shortcut_long
 
